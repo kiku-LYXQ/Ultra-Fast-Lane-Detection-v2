@@ -1,37 +1,52 @@
-dataset= 'CULane'
-data_root= '/home/lxy/lxy_project/clrnet/data/CULane' # Need to be modified before running
-epoch= 50
-batch_size= 32
-optimizer= 'SGD'
-learning_rate= 0.05
-weight_decay= 0.0001
-momentum= 0.9
-scheduler= 'multi'
-steps= [25,38]
-gamma= 0.1
-warmup= 'linear'
-warmup_iters= 695
-use_aux= False
-griding_num= 200
-backbone= '34'
-sim_loss_w= 0.0
-shp_loss_w= 0.0
-note= ''
-log_path= ''
-finetune= None
-resume= None
-test_model=''
-test_work_dir = ''
-tta=True
-num_lanes= 4
-var_loss_power= 2.0
-auto_backup= True
-num_row= 72
-num_col= 81
-train_width= 1600
-train_height= 320
-num_cell_row= 200
-num_cell_col= 100
-mean_loss_w= 0.05
-fc_norm= True
-crop_ratio = 0.6
+# ------------------------ 数据集配置 ------------------------
+dataset = 'CULane'  # 使用的数据集名称（车道线检测常用公开数据集）
+data_root = '/home/lxy/lxy_project/clrnet/data/CULane'  # 数据集根目录路径（需要根据实际路径修改）
+
+# ------------------------ 训练超参数 ------------------------
+epoch = 50          # 训练总轮数
+batch_size = 32     # 批量大小（根据GPU显存调整）
+optimizer = 'SGD'   # 优化器类型（可选SGD/Adam等）
+learning_rate = 0.05  # 初始学习率
+weight_decay = 0.0001  # 权重衰减（L2正则化系数）
+momentum = 0.9      # SGD动量参数
+
+# ------------------------ 学习率调度 ------------------------
+scheduler = 'multi'  # 学习率调整策略（multi-step）
+steps = [25, 38]    # 学习率衰减的epoch节点（在第25、38轮时衰减）
+gamma = 0.1         # 学习率衰减系数（每次衰减为当前学习率*gamma）
+warmup = 'linear'   # 学习率预热策略（线性预热）
+warmup_iters = 695  # 预热迭代次数（通常设置为一个epoch的迭代次数）
+
+# ------------------------ 模型架构配置 ------------------------
+use_aux = False     # 是否使用辅助损失
+griding_num = 200   # 车道线网格划分数量（影响检测精度）
+backbone = '34'     # 主干网络类型（ResNet34）
+
+# ------------------------ 损失函数权重 ------------------------
+sim_loss_w = 0.0    # 相似性损失权重
+shp_loss_w = 0.0    # 形状损失权重
+mean_loss_w = 0.05  # 均值损失权重
+var_loss_power = 2.0  # 方差损失幂次（用于平衡难易样本）
+
+# ------------------------ 输入/输出配置 ------------------------
+num_lanes = 4       # 最多检测的车道线数量
+train_width = 1600  # 训练图像宽度
+train_height = 320  # 训练图像高度
+num_row = 72        # 行方向网格数（对应特征图高度）
+num_col = 81        # 列方向网格数（对应特征图宽度）
+num_cell_row = 200  # 行方向单元格数（用于位置预测）
+num_cell_col = 100  # 列方向单元格数（用于位置预测）
+crop_ratio = 0.6    # 图像随机裁剪比例（数据增强用）
+
+# ------------------------ 高级配置 ------------------------
+fc_norm = True      # 是否在全连接层前进行归一化
+auto_backup = True  # 是否自动备份训练配置
+tta = True          # 测试时增强（Test Time Augmentation）
+
+# ------------------------ 路径/状态配置 ------------------------
+log_path = ''       # 训练日志保存路径（默认不指定）
+finetune = None     # 微调模型路径（迁移学习时使用）
+resume = None       # 恢复训练的检查点路径
+test_model = ''     # 测试模型路径
+test_work_dir = ''  # 测试输出目录
+note = ''           # 备注信息（用于记录实验说明）

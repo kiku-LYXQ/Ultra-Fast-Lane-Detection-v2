@@ -71,31 +71,58 @@ def get_args():
     return parser
 
 import numpy as np
+
+
 def merge_config():
+    """合并命令行参数和配置文件，生成最终配置对象
+
+    步骤:
+        1. 解析命令行参数
+        2. 加载基础配置文件
+        3. 用命令行参数覆盖配置文件中的指定字段
+        4. 根据数据集类型初始化行/列锚点坐标
+    """
+
+    # 解析命令行参数（例如 --config, --batch_size 等参数）
     args = get_args().parse_args()
+
+    # 从配置文件路径加载基础配置（使用类似MMDetection的配置系统）
     cfg = Config.fromfile(args.config)
 
-    items = ['dataset','data_root','epoch','batch_size','optimizer','learning_rate',
-    'weight_decay','momentum','scheduler','steps','gamma','warmup','warmup_iters',
-    'use_aux','griding_num','backbone','sim_loss_w','shp_loss_w','note','log_path',
-    'finetune','resume', 'test_model','test_work_dir', 'num_lanes', 'var_loss_power', 'num_row', 'num_col', 'train_width', 'train_height',
-    'num_cell_row', 'num_cell_col', 'mean_loss_w','fc_norm','soft_loss','cls_loss_col_w', 'cls_ext_col_w', 'mean_loss_col_w', 'eval_mode', 'eval_during_training', 'split_channel', 'match_method', 'selected_lane', 'cumsum', 'masked']
-    for item in items:
-        if getattr(args, item) is not None:
-            dist_print('merge ', item, ' config')
-            setattr(cfg, item, getattr(args, item))
+    # 需要从命令行覆盖的配置字段列表（这些参数可通过命令行直接修改）
+    items = [
+        'dataset', 'data_root', 'epoch', 'batch_size', 'optimizer', 'learning_rate',
+        'weight_decay', 'momentum', 'scheduler', 'steps', 'gamma', 'warmup', 'warmup_iters',
+        'use_aux', 'griding_num', 'backbone', 'sim_loss_w', 'shp_loss_w', 'note', 'log_path',
+        'finetune', 'resume', 'test_model', 'test_work_dir', 'num_lanes', 'var_loss_power',
+        'num_row', 'num_col', 'train_width', 'train_height', 'num_cell_row', 'num_cell_col',
+        'mean_loss_w', 'fc_norm', 'soft_loss', 'cls_loss_col_w', 'cls_ext_col_w',
+        'mean_loss_col_w', 'eval_mode', 'eval_during_training', 'split_channel',
+        'match_method', 'selected_lane', 'cumsum', 'masked'
+    ]
 
+    # 遍历字段列表，用命令行参数覆盖配置文件中的值
+    for item in items:
+        if getattr(args, item) is not None:  # 检查命令行是否设置了该参数
+            dist_print('merge ', item, ' config')  # 分布式环境安全打印
+            setattr(cfg, item, getattr(args, item))  # 动态修改配置对象属性
+
+    # 根据数据集类型初始化行/列锚点（用于车道线位置预测的参考点）
     if cfg.dataset == 'CULane':
-        cfg.row_anchor = np.linspace(0.42,1, cfg.num_row)
-        cfg.col_anchor = np.linspace(0,1, cfg.num_col)
+        # CULane数据集：纵向锚点在图像高度42%到100%之间均匀分布
+        cfg.row_anchor = np.linspace(0.42, 1, cfg.num_row)
+        # 横向锚点全范围均匀分布
+        cfg.col_anchor = np.linspace(0, 1, cfg.num_col)
     elif cfg.dataset == 'Tusimple':
-        cfg.row_anchor = np.linspace(160,710, cfg.num_row)/720
-        cfg.col_anchor = np.linspace(0,1, cfg.num_col)
+        # Tusimple数据集：纵向锚点对应实际像素位置（160~710px），归一化到0-1范围
+        cfg.row_anchor = np.linspace(160, 710, cfg.num_row) / 720
+        cfg.col_anchor = np.linspace(0, 1, cfg.num_col)
     elif cfg.dataset == 'CurveLanes':
+        # CurveLanes数据集：纵向锚点在图像高度40%到100%之间均匀分布
         cfg.row_anchor = np.linspace(0.4, 1, cfg.num_row)
         cfg.col_anchor = np.linspace(0, 1, cfg.num_col)
-    
-    return args, cfg
+
+    return args, cfg  # 返回合并后的命令行参数和配置对象
 
 
 def save_model(net, optimizer, epoch,save_path, distributed):

@@ -58,24 +58,62 @@ def get_loss_dict(cfg):
     return loss_dict
 
 def get_metric_dict(cfg):
-
+    """创建模型评估指标字典
+    核心设计原则：
+    1. 多任务联合评估：同时评估行/列的位置预测和存在性判断
+    2. 动态扩展机制：根据配置灵活添加辅助任务指标
+    3. 数据流映射：明确每个指标对应的模型输出和标签数据
+    """
+    # 初始化基础指标（行方向相关指标）
     metric_dict = {
         'name': ['top1', 'top2', 'top3', 'ext_row', 'ext_col'],
-        'op': [AccTopk(-1, 1), AccTopk(-1, 2), AccTopk(-1, 3), MultiLabelAcc(),MultiLabelAcc()],
-        'data_src': [('cls_out', 'cls_label'), ('cls_out', 'cls_label'), ('cls_out', 'cls_label'), 
-        ('cls_out_ext', 'cls_out_ext_label'),('cls_out_col_ext','cls_out_col_ext_label')]
+        'op': [
+            AccTopk(-1, 1),  # 行位置预测Top1准确率（dim=-1表示自动选择分类维度）
+            AccTopk(-1, 2),  # 行位置预测Top2准确率
+            AccTopk(-1, 3),  # 行位置预测Top3准确率
+            MultiLabelAcc(), # 行存在性多标签准确率（每个位置二分类）
+            MultiLabelAcc()  # 列存在性多标签准确率
+        ],
+        'data_src': [
+            # 数据源格式：(模型输出字段名, 标签字段名)
+            ('cls_out', 'cls_label'),       # 行位置预测结果
+            ('cls_out', 'cls_label'),       # 同一数据源复用
+            ('cls_out', 'cls_label'),
+            ('cls_out_ext', 'cls_out_ext_label'),    # 行存在性预测
+            ('cls_out_col_ext','cls_out_col_ext_label') # 列存在性预测
+        ]
     }
+
+    # 添加列方向评估指标 ------------------------------------------------------
+    # 扩展指标名称（与行指标对称设计）
     metric_dict['name'].extend(['col_top1', 'col_top2', 'col_top3'])
-    metric_dict['op'].extend([AccTopk(-1, 1), AccTopk(-1, 2), AccTopk(-1, 3),])
-    metric_dict['data_src'].extend([('cls_out_col', 'cls_label_col'), ('cls_out_col', 'cls_label_col'), ('cls_out_col', 'cls_label_col'), ])
+    # 使用相同的评估类但不同数据源
+    metric_dict['op'].extend([
+        AccTopk(-1, 1),  # 列Top1准确率（dim参数自动适应输出维度）
+        AccTopk(-1, 2),  # 列Top2准确率
+        AccTopk(-1, 3)   # 列Top3准确率
+    ])
+    # 指定列方向预测的数据源
+    metric_dict['data_src'].extend([
+        ('cls_out_col', 'cls_label_col'),  # 列位置预测结果
+        ('cls_out_col', 'cls_label_col'),
+        ('cls_out_col', 'cls_label_col')
+    ])
 
+    # 添加辅助任务指标（当启用分割头时）-----------------------------------------
     if cfg.use_aux:
-        metric_dict['name'].append('iou')
-        metric_dict['op'].append(Metric_mIoU(5))
-        metric_dict['data_src'].append(('seg_out', 'seg_label'))
+        metric_dict['name'].append('iou')  # 分割任务评估指标
+        metric_dict['op'].append(
+            Metric_mIoU(5)  # 基于5个IoU计算周期的移动平均
+        )
+        metric_dict['data_src'].append(
+            ('seg_out', 'seg_label')  # 分割输出与分割标签
+        )
 
+    # 完整性校验（确保三个列表长度一致）
     assert len(metric_dict['name']) == len(metric_dict['op']) == len(metric_dict['data_src'])
     return metric_dict
+
 
 
 class MultiStepLR:

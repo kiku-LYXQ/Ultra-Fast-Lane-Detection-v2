@@ -674,150 +674,270 @@ def run_test_tta(dataset, net, data_root, exp_name, work_dir,distributed, crop_r
         generate_lines_local_tta(loc_row, loc_row_left, loc_row_right, exist_row, exist_row_left, exist_row_right, names, output_path, row_anchor)
         generate_lines_col_local_tta(loc_col, loc_col_up, loc_col_down, exist_col, exist_col_up, exist_col_down, names, output_path, col_anchor)
 
-def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor = None, col_anchor = None, mode = '2row2col'):
+
+def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None, col_anchor=None, mode='2row2col'):
+    """
+    生成符合Tusimple数据集格式的车道线坐标
+
+    参数:
+        参数:
+        row_out: 行方向预测输出（形状：[row_num_grid, row_num_cls, row_num_lane]）
+            - row_num_grid: 横向网格数量（如100）
+            - row_num_cls: <span style="color: red">纵向锚点数量（如56）
+            - row_num_lane: 车道线数量（如4）
+        row_ext: 行方向存在性概率<span style="color: red">（形状：[row_num_grid, row_num_cls, row_num_lane]）
+        col_out: 列方向预测输出（形状：[col_num_grid, col_num_cls, col_num_lane]）
+            - col_num_grid: 纵向网格数量
+            - col_num_cls: 列锚点类别数（横向锚点数，如41）
+            - col_num_lane: 车道线数量
+        col_ext: 列方向存在性概率
+        row_anchor: 纵向锚点的归一化位置（长度row_num_cls的数组）
+        col_anchor: 横向锚点的归一化位置（长度col_num_cls的数组）
+        mode: 处理模式，可选：
+            - '2row2col'：处理2条行车道线和2条列车道线（默认）
+            - '4row'：处理所有4条行车道线
+            - '4col'：处理所有4条列车道线
+
+    返回:
+        all_lanes: 车道线坐标列表，每个元素是长度为56的列表，对应tusimple_h_sample的X坐标（-2表示无效点）
+    """
+    # Tusimple官方要求的固定Y轴采样点（56个点，从160到710像素）
     tusimple_h_sample = np.linspace(160, 710, 56)
-    row_num_grid, row_num_cls, row_num_lane = row_out.shape
+
+    # 解析行预测输出的维度信息
+    row_num_grid, row_num_cls, row_num_lane = row_out.shape  # 格式：[网格数, 锚点数, 车道数]
+    # 获取行方向预测的最大概率索引（形状：[row_num_cls, row_num_lane]）
     row_max_indices = row_out.argmax(0).cpu()
-    # num_cls, num_lanes
-    row_valid = row_ext.argmax(0).cpu()
-    # num_cls, num_lanes
+    # 行存在性判断：在网格维度取argmax（若存在性预测是二分类，需调整维度顺序）
+    row_valid = row_ext.argmax(0).cpu()  # 形状：[row_num_cls, row_num_lane]
+    # 将数据移到CPU并转换为float类型
     row_out = row_out.cpu()
 
+    # 解析列预测输出的维度信息（逻辑同行预测）
     col_num_grid, col_num_cls, col_num_lane = col_out.shape
     col_max_indices = col_out.argmax(0).cpu()
-    # num_cls, num_lanes
     col_valid = col_ext.argmax(0).cpu()
-    # num_cls, num_lanes
     col_out = col_out.cpu()
 
-    # mode = '2row2col'
-
+    # 根据模式选择要处理的车道线索引 --------------------------------------------------------
     if mode == 'normal' or mode == '2row2col':
-        row_lane_list = [1, 2]
-        col_lane_list = [0, 3]
+        # 默认模式：处理第1、2条行车道线（索引从0开始）和第0、3条列车道线
+        row_lane_list = [1, 2]  # 行车道线索引
+        col_lane_list = [0, 3]  # 列车道线索引
     elif mode == '4row':
+        # 处理所有4条行车道线
         row_lane_list = range(row_num_lane)
         col_lane_list = []
     elif mode == '4col':
+        # 处理所有4条列车道线
         row_lane_list = []
         col_lane_list = range(col_num_lane)
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"未实现的模式: {mode}")
 
-    local_width_row = 14
-    local_width_col = 14
-    min_lanepts_row = 3
-    min_lanepts_col = 3
-    
-    # local_width = 2
-    all_lanes = []
+    # 局部窗口参数配置 -----------------------------------------------------------------
+    local_width_row = 14  # 行方向预测时考虑的局部窗口宽度（左右各扩展14个网格）
+    local_width_col = 14  # 列方向预测时考虑的局部窗口宽度
+    min_lanepts_row = 3  # 行车道线有效的最小点数阈值
+    min_lanepts_col = 3  # 列车道线有效的最小点数阈值
 
+    all_lanes = []  # 存储最终生成的所有车道线坐标
+
+    # ============================================================================
+    # 处理行车道线（垂直方向车道线，如左右车道线）
+    # ============================================================================
     for row_lane_idx in row_lane_list:
-        if row_valid[ :, row_lane_idx].sum() > min_lanepts_row:
-            cur_lane = []
+        # 检查当前车道线是否存在：有效点数超过阈值
+        if row_valid[:, row_lane_idx].sum() > min_lanepts_row:
+            cur_lane = []  # 存储当前车道线在56个固定Y位置的X坐标
+
+            # 遍历所有行锚点（row_num_cls=56个纵向位置）
             for row_cls_idx in range(row_num_cls):
+                # 如果当前锚点位置存在车道线
+                if row_valid[row_cls_idx, row_lane_idx]:
+                    # 确定局部窗口范围（防止越界）
+                    start_idx = max(0, row_max_indices[row_cls_idx, row_lane_idx] - local_width_row)
+                    end_idx = min(row_num_grid - 1, row_max_indices[row_cls_idx, row_lane_idx] + local_width_row)
+                    all_ind = torch.tensor(list(range(start_idx, end_idx + 1)))
 
-                if row_valid[ row_cls_idx, row_lane_idx]:
-                    all_ind = torch.tensor(list(
-                        range(
-                            max(0,row_max_indices[ row_cls_idx, row_lane_idx] - local_width_row), 
-                            min(row_num_grid-1, row_max_indices[ row_cls_idx, row_lane_idx] + local_width_row) + 1)
-                            )
-                            )
-                    coord = (row_out[all_ind,row_cls_idx,row_lane_idx].softmax(0) * all_ind.float()).sum() + 0.5
-                    coord_x = coord / (row_num_grid - 1) * 1280
-                    coord_y = row_anchor[row_cls_idx] * 720
-                    cur_lane.append(int(coord_x))
+                    # 计算加权平均位置（亚像素细化）
+                    # 1. 对窗口内的预测值做softmax归一化
+                    # 2. 用概率值加权求和得到精细化的网格位置
+                    coord = (row_out[all_ind, row_cls_idx, row_lane_idx].softmax(0) * all_ind.float()).sum() + 0.5
+                    # 将网格位置映射到实际图像坐标（假设输入图像尺寸为1280x720）
+                    coord_x = coord / (row_num_grid - 1) * 1280  # <span style="color: red">横向坐标映射</span>
+                    coord_y = row_anchor[row_cls_idx] * 720  # <span style="color: red">纵向坐标通过锚点比例计算</span>
+                    cur_lane.append(int(coord_x))  # 仅记录X坐标，Y坐标由tusimple_h_sample固定
                 else:
-                    cur_lane.append(-2)
-                    # cur_lane.append((coord_x, coord_y))
-            # cur_lane = np.array(cur_lane)
-            # p = np.polyfit(cur_lane[:,1], cur_lane[:,0], deg = 2)
-            # top_lim = min(cur_lane[:,1])
-            # # all_lane_interps.append((p, top_lim))
-            # lanes_on_tusimple = np.polyval(p, tusimple_h_sample)
-            # lanes_on_tusimple = np.round(lanes_on_tusimple)
-            # lanes_on_tusimple = lanes_on_tusimple.astype(int)
-            # lanes_on_tusimple[lanes_on_tusimple < 0] = -2
-            # lanes_on_tusimple[lanes_on_tusimple > 1280] = -2
-            # lanes_on_tusimple[tusimple_h_sample < top_lim] = -2
-            # all_lanes.append(lanes_on_tusimple.tolist())
-            all_lanes.append(cur_lane)
+                    cur_lane.append(-2)  # -2表示该Y位置无有效点
+
+            all_lanes.append(cur_lane)  # 添加当前车道线到结果列表
         else:
-            # all_lanes.append([-2]*56)
+            # 如果有效点数不足，跳过该车道线
             pass
 
+    # ============================================================================
+    # 处理列车道线（水平方向车道线，如远端的横向车道线）
+    # ============================================================================
     for col_lane_idx in col_lane_list:
-        if col_valid[ :, col_lane_idx].sum() > min_lanepts_col:
-            cur_lane = []
+        # 检查当前车道线是否存在：有效点数超过阈值
+        if col_valid[:, col_lane_idx].sum() > min_lanepts_col:
+            cur_lane = []  # 存储当前车道线的原始坐标点（用于曲线拟合）
+
+            # 遍历所有列锚点（col_num_cls=41个横向位置）
             for col_cls_idx in range(col_num_cls):
-                if col_valid[ col_cls_idx, col_lane_idx]:
-                    all_ind = torch.tensor(list(
-                        range(
-                            max(0,col_max_indices[ col_cls_idx, col_lane_idx] - local_width_col), 
-                            min(col_num_grid-1, col_max_indices[ col_cls_idx, col_lane_idx] + local_width_col) + 1)
-                            )
-                            )
-                    coord = (col_out[all_ind,col_cls_idx,col_lane_idx].softmax(0) * all_ind.float()).sum() + 0.5
-                    coord_y = coord / (col_num_grid - 1) * 720
-                    coord_x = col_anchor[col_cls_idx] * 1280
-                    cur_lane.append((coord_x, coord_y))    
+                # 如果当前锚点位置存在车道线
+                if col_valid[col_cls_idx, col_lane_idx]:
+                    # 确定局部窗口范围（逻辑同行处理）
+                    start_idx = max(0, col_max_indices[col_cls_idx, col_lane_idx] - local_width_col)
+                    end_idx = min(col_num_grid - 1, col_max_indices[col_cls_idx, col_lane_idx] + local_width_col)
+                    all_ind = torch.tensor(list(range(start_idx, end_idx + 1)))
+
+                    # 计算加权平均位置（亚像素细化）
+                    coord = (col_out[all_ind, col_cls_idx, col_lane_idx].softmax(0) * all_ind.float()).sum() + 0.5
+                    coord_y = coord / (col_num_grid - 1) * 720  # 映射到Y轴
+                    coord_x = col_anchor[col_cls_idx] * 1280  # 获取X轴实际坐标
+                    cur_lane.append((coord_x, coord_y))  # 存储(X,Y)坐标对
+
+            # 将原始点转换为numpy数组并进行二次多项式拟合 --------------------------------
             cur_lane = np.array(cur_lane)
-            top_lim = min(cur_lane[:,1])
-            bot_lim = max(cur_lane[:,1])
-            
-            p = np.polyfit(cur_lane[:,1], cur_lane[:,0], deg = 2)
-            lanes_on_tusimple = np.polyval(p, tusimple_h_sample)
+            if len(cur_lane) >= 2:  # 至少需要2个点才能拟合
+                top_lim = min(cur_lane[:, 1])  # 车道线最顶端Y坐标
+                bot_lim = max(cur_lane[:, 1])  # 车道线最底端Y坐标
 
-            # cur_lane_x = cur_lane[:,0]
-            # cur_lane_y = cur_lane[:,1]
-            # cur_lane_x_sorted = [x for _, x in sorted(zip(cur_lane_y, cur_lane_x))]
-            # cur_lane_y_sorted = sorted(cur_lane_y)
-            # p = InterpolatedUnivariateSpline(cur_lane_y_sorted, cur_lane_x_sorted, k=min(3, len(cur_lane_x_sorted) - 1))
-            # lanes_on_tusimple = p(tusimple_h_sample)
+                # 使用二次多项式拟合X = f(Y)
+                p = np.polyfit(cur_lane[:, 1], cur_lane[:, 0], deg=2)
+                # 在固定Y采样点上计算X坐标
+                lanes_on_tusimple = np.polyval(p, tusimple_h_sample)
 
-            lanes_on_tusimple = np.round(lanes_on_tusimple)
-            lanes_on_tusimple = lanes_on_tusimple.astype(int)
-            lanes_on_tusimple[lanes_on_tusimple < 0] = -2
-            lanes_on_tusimple[lanes_on_tusimple > 1280] = -2
-            lanes_on_tusimple[tusimple_h_sample < top_lim] = -2
-            lanes_on_tusimple[tusimple_h_sample > bot_lim] = -2
-            all_lanes.append(lanes_on_tusimple.tolist())
+                # 后处理：限制坐标范围和有效性
+                lanes_on_tusimple = np.round(lanes_on_tusimple).astype(int)
+                lanes_on_tusimple[lanes_on_tusimple < 0] = -2  # 过滤负值
+                lanes_on_tusimple[lanes_on_tusimple > 1280] = -2  # 过滤超出右边界的值
+                lanes_on_tusimple[tusimple_h_sample < top_lim] = -2  # 过滤顶端以上的点
+                lanes_on_tusimple[tusimple_h_sample > bot_lim] = -2  # 过滤底端以下的点
+                all_lanes.append(lanes_on_tusimple.tolist())
         else:
-            # all_lanes.append([-2]*56)
+            # 如果有效点数不足，跳过该车道线
             pass
-    # for (p, top_lim) in all_lane_interps:
-    #     lanes_on_tusimple = np.polyval(p, tusimple_h_sample)
-    #     lanes_on_tusimple = np.round(lanes_on_tusimple)
-    #     lanes_on_tusimple = lanes_on_tusimple.astype(int)
-    #     lanes_on_tusimple[lanes_on_tusimple < 0] = -2
-    #     lanes_on_tusimple[lanes_on_tusimple > 1280] = -2
-    #     lanes_on_tusimple[tusimple_h_sample < top_lim] = -2
-    #     all_lanes.append(lanes_on_tusimple.tolist())
-    return all_lanes
-    
-def run_test_tusimple(net,data_root,work_dir,exp_name, distributed, crop_ratio, train_width, train_height, batch_size = 8, row_anchor = None, col_anchor = None):
-    output_path = os.path.join(work_dir,exp_name+'.%d.txt'% get_rank())
-    fp = open(output_path,'w')
-    loader = get_test_loader(batch_size,data_root,'Tusimple', distributed, crop_ratio, train_width, train_height)
-    for data in dist_tqdm(loader):
-        imgs,names = data
-        imgs = imgs.cuda()
-        with torch.no_grad():
-            pred = net(imgs)
-        for b_idx,name in enumerate(names):
-            tmp_dict = {}
-            tmp_dict['lanes'] = generate_tusimple_lines(pred['loc_row'][b_idx], pred['exist_row'][b_idx], pred['loc_col'][b_idx], pred['exist_col'][b_idx], row_anchor = row_anchor, col_anchor = col_anchor, mode = '4row')
-            tmp_dict['h_samples'] = [160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260,
-             270, 280, 290, 300, 310, 320, 330, 340, 350, 360, 370, 380, 390, 400, 410, 420, 
-             430, 440, 450, 460, 470, 480, 490, 500, 510, 520, 530, 540, 550, 560, 570, 580, 
-             590, 600, 610, 620, 630, 640, 650, 660, 670, 680, 690, 700, 710]
-            tmp_dict['raw_file'] = name
-            tmp_dict['run_time'] = 10
-            json_str = json.dumps(tmp_dict)
 
-            fp.write(json_str+'\n')
-    fp.close()
+    return all_lanes  # 返回所有车道线的坐标列表
+
+
+def run_test_tusimple(net, data_root, work_dir, exp_name, distributed, crop_ratio,
+                      train_width, train_height, batch_size=8, row_anchor=None, col_anchor=None):
+    """在Tusimple数据集上运行测试并生成评估文件
+
+    参数:
+        net: 训练好的车道线检测模型
+        data_root: 数据集根目录路径
+        work_dir: 工作目录，用于保存临时结果
+        exp_name: 实验名称标识符（用于生成结果文件名）
+        distributed: 是否使用分布式模式
+        crop_ratio: 图像裁剪比例（数据增强参数）
+        train_width: 训练时图像宽度（预处理尺寸）
+        train_height: 训练时图像高度（预处理尺寸）
+        batch_size: 批处理大小（默认8）
+        row_anchor: 纵向锚点配置（Y轴采样位置）
+        col_anchor: 横向锚点配置（X轴采样位置）
+    """
+    # 生成分布式环境下的结果文件路径（每个进程独立文件避免写入冲突）
+    output_path = os.path.join(work_dir, exp_name + '.%d.txt' % get_rank())
+
+    # 打开结果文件准备写入（文件格式需符合Tusimple官方评估要求）
+    with open(output_path, 'w') as fp:
+        # 获取测试集数据加载器（包含预处理和数据增强）
+        loader = get_test_loader(
+            batch_size, data_root, 'Tusimple', distributed,
+            crop_ratio, train_width, train_height
+        )
+
+        # 使用分布式进度条遍历测试集（dist_tqdm为支持分布式的进度条工具）
+        for data in dist_tqdm(loader):
+            # 解构数据：imgs为预处理后的图像张量，names为对应的原始文件名
+            imgs, names = data
+
+            # 将图像数据移至GPU
+            imgs = imgs.cuda()
+
+            # 禁用梯度计算以提升推理效率
+            with torch.no_grad():
+                # 模型前向传播，获取预测结果
+                # pred字典结构示例:
+                # {
+                #   'loc_row': 行方向坐标预测（形状：[B, 56, 4, 100]）
+                #   - B: 批次大小
+                #   - 56: 纵向锚点数(num_row)
+                #   - 4: 车道线数量(num_lanes)
+                #   - 100: 横向网格数(griding_num)
+                #
+                #   'exist_row': 行存在性概率（形状：[B, 2, 56, 4]）
+                #   - 2: 存在性分类数（0-不存在，1-存在）
+                #   - 56: 纵向锚点数
+                #   - 4: 车道线数量
+                #
+                #   'loc_col': 列方向坐标预测（形状：[B, 41, 4, 100]）
+                #   - 41: 横向锚点数(num_col)
+                #   - 4: 车道线数量
+                #   - 100: 纵向网格数
+                #
+                #   'exist_col': 列存在性概率（形状：[B, 2, 41, 4]）
+                #   - 2: 存在性分类数
+                #   - 41: 横向锚点数
+                #   - 4: 车道线数量
+                # }
+                pred = net(imgs)
+
+            # 遍历批次中的每个样本
+            for b_idx, name in enumerate(names):
+                # 构建符合Tusimple评估要求的JSON结构
+                result_dict = {
+                    # 生成车道线坐标（核心逻辑）
+                    # generate_tusimple_lines参数说明:
+                    # - loc_row: 行方向坐标预测（形状：[56, 4, 100]）
+                    #   - 56: 纵向锚点数(num_row)
+                    #   - 4: 车道线数量(num_lanes)
+                    #   - 100: 横向网格数(griding_num)
+                    # - exist_row: 行存在性概率（形状：[2, 56, 4]）
+                    #   - 2: 存在性分类维度
+                    #   - 56: 纵向锚点数
+                    #   - 4: 车道线数量
+                    # - loc_col: 列方向坐标预测（形状：[41, 4, 100]）
+                    #   - 41: 横向锚点数(num_col)
+                    #   - 4: 车道线数量
+                    #   - 100: 纵向网格数
+                    # - exist_col: 列存在性概率（形状：[2, 41, 4]）
+                    #   - 2: 存在性分类维度
+                    #   - 41: 横向锚点数
+                    #   - 4: 车道线数量
+                    # - mode='4row': 使用4行锚点解码模式
+                    # - row_anchor: 纵向锚点位置（56个归一化坐标）
+                    # - col_anchor: 横向锚点位置（41个归一化坐标）
+                    'lanes': generate_tusimple_lines(
+                        pred['loc_row'][b_idx],
+                        pred['exist_row'][b_idx],
+                        pred['loc_col'][b_idx],
+                        pred['exist_col'][b_idx],
+                        row_anchor=row_anchor,
+                        col_anchor=col_anchor,
+                        mode='4row'
+                    ),
+
+                    # Tusimple官方要求的固定Y轴采样点（从160到710，间隔10像素）
+                    'h_samples': [i for i in range(160, 711, 10)],
+
+                    # 原始图像文件名（需与标注文件对应）
+                    'raw_file': name,
+
+                    # 运行时间（单位ms，示例值，实际应记录真实推理时间）
+                    'run_time': 10
+                }
+
+                # 将结果转换为JSON字符串并写入文件
+                json_str = json.dumps(result_dict)
+                fp.write(json_str + '\n')
+
+    # 文件自动关闭（with语句保证）
 
 def combine_tusimple_test(work_dir,exp_name):
     size = get_world_size()

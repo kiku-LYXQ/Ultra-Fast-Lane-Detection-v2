@@ -32,18 +32,45 @@ def softmax(x, axis=-1):
     return e_x / e_x.sum(axis=axis, keepdims=True)
 
 class UFLDv2_ONNX:
-    def __init__(self, onnx_path, config_path, ori_size):
+    def __init__(self, onnx_path, config_path, ori_size, use_gpu=False):
         """
         初始化车道线检测器（关键参数说明）
         参数详解：
             onnx_path   : ONNX模型文件路径（需与训练时的输入输出对齐）
             config_path : 训练配置文件路径（包含模型参数和训练配置）
             ori_size    : 原始输入图像尺寸（宽, 高）（影响坐标映射精度）
+            use_gpu     : 是否启用CUDA GPU加速
         """
         # ONNX Runtime会话初始化 ----------------------------------------------
         # 使用默认执行提供器（CPUExecutionProvider）
         # 注意：树莓派上需要安装onnxruntime的ARM兼容版本
-        self.session = ort.InferenceSession(onnx_path)
+        # 配置执行提供器优先级
+        providers = ['CPUExecutionProvider']  # 默认使用CPU
+        if use_gpu:
+            # 优先尝试CUDA，然后是TensorRT（如果可用）
+            providers = [
+                ('CUDAExecutionProvider', {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kNextPowerOfTwo',
+                    'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 限制2GB显存
+                    'cudnn_conv_algo_search': 'HEURISTIC',
+                    'do_copy_in_default_stream': True,
+                }),
+                'CPUExecutionProvider'
+            ]
+
+        # 初始化ONNX Runtime会话（添加providers参数）
+        self.session = ort.InferenceSession(
+            onnx_path,
+            providers=providers  # 指定执行提供器优先级
+        )
+
+        # 检查GPU是否实际启用（调试信息）
+        print(f"当前使用的执行提供器：{self.session.get_providers()}")
+        if use_gpu and 'CUDAExecutionProvider' in self.session.get_providers():
+            print("CUDA GPU加速已启用")
+        else:
+            print("使用CPU进行推理")
 
         # 输入输出节点信息获取（模型部署关键信息）-------------------------------
         # 输入节点名称（通常为单个输入）
@@ -208,6 +235,8 @@ def get_args():
                        help='输入视频路径（支持MP4/AVI格式）')
     parser.add_argument('--ori_size', default=(1600, 320), type=tuple,
                        help='原始训练尺寸（宽，高）需与模型匹配')
+    parser.add_argument('--use_gpu', action='store_true',
+                        help='启用CUDA GPU加速（需要安装onnxruntime-gpu）')
     return parser.parse_args()
 
 
@@ -224,7 +253,8 @@ if __name__ == "__main__":
     detector = UFLDv2_ONNX(
         args.onnx_path,
         args.config_path,
-        args.ori_size
+        args.ori_size,
+        use_gpu = args.use_gpu  # 新增参数
     )
 
     # 主循环处理帧
