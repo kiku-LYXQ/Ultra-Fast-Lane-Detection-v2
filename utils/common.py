@@ -115,8 +115,9 @@ def merge_config():
         cfg.col_anchor = np.linspace(0, 1, cfg.num_col)
     elif cfg.dataset == 'Tusimple':
         # Tusimple数据集：纵向锚点对应实际像素位置（160~710px），归一化到0-1范围
-        cfg.row_anchor = np.linspace(160, 710, cfg.num_row) / 720
-        cfg.col_anchor = np.linspace(0, 1, cfg.num_col)
+        cfg.row_anchor = np.linspace(160, 710, cfg.num_row) / 720 #这里是直接传像素点的值进去，需要归一化
+        # 这个不归一化
+        cfg.col_anchor = np.linspace(0, 1, cfg.num_col) # 这里是直接0-1之间生成，不需要归一化了
     elif cfg.dataset == 'CurveLanes':
         # CurveLanes数据集：纵向锚点在图像高度40%到100%之间均匀分布
         cfg.row_anchor = np.linspace(0.4, 1, cfg.num_row)

@@ -29,7 +29,7 @@ def get_args():
     parser.add_argument('--accuracy', default='fp32', choices=['fp16', 'fp32'],
                       help='输出模型的精度类型', type=str)
     # 输入图像尺寸（宽，高）需与训练时一致
-    parser.add_argument('--size', default=(800, 320),
+    parser.add_argument('--size', default=(1600, 320),         #  按照不同的模型输入修改
                       help='原始输入图像尺寸（宽, 高）', type=tuple)
     return parser.parse_args()
 

@@ -7,7 +7,7 @@
 import cv2
 import numpy as np
 import onnxruntime as ort  # ONNX Runtime推理库
-import torch
+import torch   # 引入了torch所以不会有cudnn链接库报错这种问题
 import argparse
 import os
 import sys
@@ -18,7 +18,7 @@ from utils.config import Config  # 配置文件加载类
 
 
 class UFLDv2_ONNX:
-    def __init__(self, onnx_path, config_path, ori_size):
+    def __init__(self, onnx_path, config_path, ori_size, use_gpu=False):
         """
         初始化车道线检测器
         参数：
@@ -27,8 +27,34 @@ class UFLDv2_ONNX:
             ori_size    : 原始输入图像尺寸（宽, 高）
         """
         # 初始化ONNX Runtime推理会话
-        # 使用默认提供器（优先使用GPU如果可用）
-        self.session = ort.InferenceSession(onnx_path)
+        # 配置执行提供器优先级
+        providers = ['CPUExecutionProvider']  # 默认使用CPU
+        if use_gpu:
+            # 优先尝试CUDA，然后是TensorRT（如果可用）
+            providers = [
+                ('CUDAExecutionProvider', {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kNextPowerOfTwo',
+                    'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 限制2GB显存
+                    'cudnn_conv_algo_search': 'HEURISTIC',
+                    'do_copy_in_default_stream': True,
+                }),
+                'CPUExecutionProvider'
+            ]
+
+        # 初始化ONNX Runtime会话（添加providers参数）
+        self.session = ort.InferenceSession(
+            onnx_path,
+            providers=providers  # 指定执行提供器优先级
+        )
+
+        # 检查GPU是否实际启用（调试信息）
+        print("可用Providers:", ort.get_available_providers())
+        print(f"当前使用的执行提供器：{self.session.get_providers()}")
+        if use_gpu and 'CUDAExecutionProvider' in self.session.get_providers():
+            print("CUDA GPU加速已启用")
+        else:
+            print("使用CPU进行推理")
 
         # 获取输入输出节点信息 -----------------------------------------------------
         # 输入节点名称（模型只有一个输入）
@@ -64,10 +90,10 @@ class UFLDv2_ONNX:
             coords : 车道线坐标列表，每个元素是该车道线的坐标点列表
         """
         # 将numpy数组转换为torch张量（保持与原始实现兼容）
-        loc_row = torch.from_numpy(pred[0])  # 行位置预测（形状：[1, num_row, num_cls_row, 4]）
-        loc_col = torch.from_numpy(pred[1])  # 列位置预测（形状：[1, num_col, num_cls_col, 4]）
-        exist_row = torch.from_numpy(pred[2])  # 行存在性预测
-        exist_col = torch.from_numpy(pred[3])  # 列存在性预测
+        loc_row = torch.from_numpy(pred[0])  # 行位置预测（形状：[1, num_grid_row, num_cls_row, 4]）
+        loc_col = torch.from_numpy(pred[1])  # 列位置预测（形状：[1, num_grid_row, num_cls_col, 4]）
+        exist_row = torch.from_numpy(pred[2])  # 行存在性预测 [1, num_grid_row, 2, 4]
+        exist_col = torch.from_numpy(pred[3])  # 列存在性预测 [1, num_grid_row, 2, 4]
 
         # 获取各维度尺寸
         batch_size, num_grid_row, num_cls_row, num_lane_row = loc_row.shape
@@ -136,41 +162,75 @@ class UFLDv2_ONNX:
 
     def forward(self, img):
         """
-        完整处理流程：预处理 → 推理 → 后处理 → 可视化
+        完整的车道线检测流程：预处理 → 推理 → 后处理 → 可视化
         参数：
-            img : 输入图像（BGR格式，numpy数组）
+            img : 输入图像（BGR格式，numpy数组，形状为[H, W, 3]）
+        返回：
+            coords : 处理后的车道线坐标列表
         """
-        im0 = img.copy()  # 保留原始图像用于可视化
+        # ============================ 视频帧预处理 ==============================
+        # 阶段目标：将输入帧适配到模型训练时的视野范围和比例
 
-        # 图像预处理 ------------------------------------------------------------
-        # 1. 裁剪顶部区域（根据训练时的裁剪比例）
-        img = img[self.cut_height:, :, :]
-        # 2. 调整到模型输入尺寸（双三次插值保持清晰度）
-        img = cv2.resize(img, (self.input_width, self.input_height), cv2.INTER_CUBIC)
-        # 3. 归一化到[0,1]范围
-        img = img.astype(np.float32) / 255.0
-        # 4. 调整维度顺序为NCHW（模型输入要求）
-        # 原始形状：HWC (height, width, channel)
-        # 转换后：NCHW (batch=1, channel, height, width)
-        img = np.transpose(img, (2, 0, 1))[np.newaxis, ...]
+        # 1. 基准尺寸调整（双线性插值平衡效率与质量）
+        resized_frame = cv2.resize(img, (1600, 903), interpolation=cv2.INTER_LINEAR)
 
-        # ONNX推理 -------------------------------------------------------------
-        outputs = self.session.run(
-            self.output_names,  # 需要获取的输出节点名称列表
-            {self.input_name: img}  # 输入数据字典
-        )
-        # 输出顺序对应：loc_row, loc_col, exist_row, exist_col
+        # 2. 关键区域提取（380:700行，去除天空和引擎盖干扰）
+        roi_frame = resized_frame[380:700, :, :]  # 获取高度320px的ROI
 
-        # 后处理：转换坐标 ------------------------------------------------------
-        coords = self.pred2coords(outputs)
+        # 3. 保留原始ROI用于可视化（避免后续处理影响显示）
+        visual_frame = roi_frame.copy()  # 类型：numpy.ndarray (320, 1600, 3)
 
-        # 可视化结果 -----------------------------------------------------------
-        # 在原始图像上绘制检测到的车道线点
-        for lane in coords:  # 遍历每条车道线
-            for coord in lane:  # 遍历车道线的每个点
-                # 绘制绿色实心圆点（半径2px）
-                cv2.circle(im0, coord, 2, (0, 255, 0), -1)
-        cv2.imshow("result", im0)  # 显示结果
+        # ============================ 模型输入预处理 =============================
+        # 阶段目标：生成符合模型输入规范的张量，需与训练预处理严格一致
+
+        # 1. 裁剪顶部区域（根据训练配置去除近场视野）
+        model_input = roi_frame[self.cut_height:, :, :]  # 形状变为 (320-cut_height, 1600, 3)
+
+        # 2. 尺寸标准化（双三次插值保留几何特征）
+        model_input = cv2.resize(
+            model_input,
+            (self.input_width, self.input_height),
+            interpolation=cv2.INTER_CUBIC
+        )  # 输出形状 (input_height, input_width, 3)
+
+        # 3. 归一化处理（匹配训练时的数据标准化方式）
+        model_input = model_input.astype(np.float32) / 255.0
+
+        # 4. 转换为NCHW格式（添加批次维度，调整通道顺序）
+        input_tensor = np.transpose(model_input, (2, 0, 1))[np.newaxis, ...]  # 形状 (1, 3, H, W)
+
+        # 5. 确保内存连续性（提升推理效率）
+        input_tensor = np.ascontiguousarray(input_tensor)
+
+        # ============================== 模型推理 ================================
+        # 使用ONNX Runtime进行高效推理
+        model_outputs = self.session.run(
+            output_names=self.output_names,  # 预加载的输出节点名称
+            input_feed={self.input_name: input_tensor}  # 输入数据字典
+        )  # 输出顺序：loc_row, loc_col, exist_row, exist_col
+
+        # ============================ 后处理流程 ================================
+        # 将模型输出转换为实际坐标
+        coords = self.pred2coords(model_outputs)  # 坐标格式 [[(x1,y1), (x2,y2), ...], ...]
+
+        # ============================= 结果可视化 ================================
+        # 在原始ROI图像上叠加检测结果
+        # 仅绘制检测点
+        for lane_points in coords:  # 遍历每条车道线
+            if len(lane_points) == 0:
+                continue
+            # 绘制每个检测点
+            for pt in lane_points:
+                # 将浮点坐标转换为整数像素位置
+                x, y = int(pt[0]), int(pt[1])
+                # 绘制绿色实心圆点（半径3px）
+                cv2.circle(visual_frame, (x, y), radius=3, color=(0, 255, 0), thickness=-1)
+
+        # 实时显示检测结果
+        cv2.imshow("Lane Detection", visual_frame)
+        cv2.waitKey(1)  # 允许图像窗口更新
+
+        return coords
 
 
 def get_args():
@@ -184,6 +244,8 @@ def get_args():
                         help='输入视频路径', type=str)
     parser.add_argument('--ori_size', default=(1600, 320),
                         help='原始图像尺寸（宽, 高）', type=tuple)
+    parser.add_argument('--use_gpu', action='store_true',
+                        help='启用CUDA GPU加速（需要安装onnxruntime-gpu）')
     return parser.parse_args()
 
 
@@ -191,18 +253,12 @@ if __name__ == "__main__":
     args = get_args()
     cap = cv2.VideoCapture(args.video_path)  # 打开视频文件
     # 初始化检测器
-    detector = UFLDv2_ONNX(args.onnx_path, args.config_path, args.ori_size)
+    detector = UFLDv2_ONNX(args.onnx_path, args.config_path, args.ori_size, use_gpu = args.use_gpu)
 
     while True:
         success, img = cap.read()
         if not success:  # 视频读取结束
             break
-
-        # 视频帧预处理 ----------------------------------------------------------
-        # 1. 调整到1600x903分辨率（适配原始模型训练尺寸）
-        img = cv2.resize(img, (1600, 903))
-        # 2. 裁剪ROI区域（380:700行，所有列）
-        img = img[380:700, :, :]
 
         # 执行检测
         detector.forward(img)

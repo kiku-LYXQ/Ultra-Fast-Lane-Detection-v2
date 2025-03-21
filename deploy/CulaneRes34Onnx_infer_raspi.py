@@ -5,7 +5,7 @@
 2. 多分类预测：每个锚点位置预测多个可能的位置偏移量
 3. 动态加权融合：通过softmax加权融合多个预测结果，提高位置精度
 """
-
+# 注意，这里没有引入torch，所以cuda的执行器需要完整的nvidia-cuda-toolkit，torch是个动态的，以及需要安装的是onnx对应版本的nvidia-cuda-toolkit
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -66,6 +66,7 @@ class UFLDv2_ONNX:
         )
 
         # 检查GPU是否实际启用（调试信息）
+        print("可用Providers:", ort.get_available_providers())
         print(f"当前使用的执行提供器：{self.session.get_providers()}")
         if use_gpu and 'CUDAExecutionProvider' in self.session.get_providers():
             print("CUDA GPU加速已启用")
@@ -113,13 +114,13 @@ class UFLDv2_ONNX:
         4. 映射到原始图像坐标系
         """
         # 模型输出解析（顺序必须与模型输出一致）-------------------------------
-        loc_row = pred[0]  # 行位置预测 [1, num_row, num_cls_row, 4]
-        loc_col = pred[1]  # 列位置预测 [1, num_col, num_cls_col, 4]
-        exist_row = pred[2]  # 行存在性概率 [1, num_cls_row, 4]
-        exist_col = pred[3]  # 列存在性概率 [1, num_cls_col, 4]
+        loc_row = pred[0]  # 行位置预测 [1, num_grid_row, num_cls_row, 4]
+        loc_col = pred[1]  # 列位置预测 [1, num_grid_row, num_cls_col, 4]
+        exist_row = pred[2]  # 行存在性概率 [1, num_grid_row, 2, 4]
+        exist_col = pred[3]  # 列存在性概率 [1, num_grid_row, 2, 4]
 
         # 最大概率索引获取（numpy实现）----------------------------------------
-        # loc_row形状说明：[batch, num_grid_row, num_cls_row, num_lane_row]
+        # loc_row形状说明：[batch, num_grid_row, num_cls_row, num_lane]
         max_indices_row = np.argmax(loc_row, axis=1)  # 沿num_grid_row维度取最大值
         valid_row = np.argmax(exist_row, axis=1)      # 存在性判断（0/1）
 
@@ -134,7 +135,7 @@ class UFLDv2_ONNX:
         for i in row_lane_idx:
             tmp = []
             # 存在性判断：有效锚点超过半数则视为存在车道线
-            if valid_row[0, :, i].sum() > loc_row.shape[2] / 2:
+            if valid_row[0, :, i].sum() > self.num_row / 2:
                 # 遍历每个行锚点（垂直方向采样点）
                 for k in range(valid_row.shape[1]):
                     if valid_row[0, k, i]:  # 当前锚点存在车道线
@@ -146,7 +147,7 @@ class UFLDv2_ONNX:
 
                         # 加权平均计算（关键精度提升步骤）-----------------------
                         # 公式：out_tmp = Σ(softmax(score) * index) + 0.5
-                        weights = softmax(loc_row[0, all_ind, k, i], axis=0)
+                        weights = softmax(loc_row[0, all_ind, k, i], axis=-1)
                         out_tmp = np.sum(weights * all_ind) + 0.5  # +0.5用于四舍五入
 
                         # 坐标映射：将归一化位置转换为实际像素坐标
@@ -162,7 +163,7 @@ class UFLDv2_ONNX:
         for i in col_lane_idx:
             tmp = []
             # 存在性阈值稍低（1/4有效锚点即视为存在）
-            if valid_col[0, :, i].sum() > loc_col.shape[2] / 4:
+            if valid_col[0, :, i].sum() > self.num_col / 4:
                 for k in range(valid_col.shape[1]):
                     if valid_col[0, k, i]:
                         current_max = max_indices_col[0, k, i]
@@ -170,7 +171,7 @@ class UFLDv2_ONNX:
                         end = min(loc_col.shape[1]-1, current_max + self.input_width) + 1
                         all_ind = np.arange(start, end)
 
-                        weights = softmax(loc_col[0, all_ind, k, i], axis=0)
+                        weights = softmax(loc_col[0, all_ind, k, i], axis=-1)
                         out_tmp = np.sum(weights * all_ind) + 0.5
 
                         # 注意此处映射到高度方向

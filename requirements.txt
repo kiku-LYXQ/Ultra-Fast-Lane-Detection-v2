@@ -42,7 +42,7 @@ nvidia-nvtx-cu12==12.4.127
 onnx==1.17.0
 onnxconverter-common==1.14.0
 onnxmltools==1.13.0
-onnxruntime==1.20.1
+onnxruntime-gpu==1.21.0
 opencv-python==4.11.0.86
 packaging==24.2
 pathspec @ file:///work/ci_py311_2/pathspec_1679337288229/work

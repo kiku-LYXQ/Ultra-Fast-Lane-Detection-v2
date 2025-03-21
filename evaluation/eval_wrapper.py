@@ -682,17 +682,25 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
     参数:
         参数:
         row_out: 行方向预测输出（形状：[row_num_grid, row_num_cls, row_num_lane]）
+            +++ 存储内容: row_out[k, i, j] 表示在第i个纵向锚点(Y坐标)、第j条车道线上，模型预测位于第k个横向网格的概率
             - row_num_grid: 横向网格数量（如100）
             - row_num_cls: <span style="color: red">纵向锚点数量（如56）
             - row_num_lane: 车道线数量（如4）
-        row_ext: 行方向存在性概率<span style="color: red">（形状：[row_num_grid, row_num_cls, row_num_lane]）
+        row_ext: 行方向存在性概率<span style="color: red">（形状：[2, row_num_cls, row_num_lane]）
+            +++ 存储内容:
+            +++ - row_ext[0, i, j]：第i个纵向锚点(Y坐标)、第j条车道线不存在的概率
+            +++ - row_ext[1, i, j]：第i个纵向锚点(Y坐标)、第j条车道线存在的概率
         col_out: 列方向预测输出（形状：[col_num_grid, col_num_cls, col_num_lane]）
+            +++ 存储内容: col_out[k, i, j] 表示在第i个横向锚点(X坐标)、第j条车道线上，模型预测位于第k个纵向网格的概率
             - col_num_grid: 纵向网格数量
             - col_num_cls: 列锚点类别数（横向锚点数，如41）
             - col_num_lane: 车道线数量
         col_ext: 列方向存在性概率
+            +++ 存储内容: 同row_ext逻辑，但作用于横向锚点和纵向网格
         row_anchor: 纵向锚点的归一化位置（长度row_num_cls的数组）
+            +++ 示例: [0.2, 0.25, ..., 0.98] 对应Y轴160~710像素的归一化坐标
         col_anchor: 横向锚点的归一化位置（长度col_num_cls的数组）
+            +++ 示例: [0.0, 0.05, ..., 1.0] 对应X轴0~1280像素的归一化坐标
         mode: 处理模式，可选：
             - '2row2col'：处理2条行车道线和2条列车道线（默认）
             - '4row'：处理所有4条行车道线
@@ -700,6 +708,12 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
 
     返回:
         all_lanes: 车道线坐标列表，每个元素是长度为56的列表，对应tusimple_h_sample的X坐标（-2表示无效点）
+            +++ 输出结构示例:
+            +++ [
+            +++   [320, 325, ..., -2, 310],  # 车道线0在56个固定Y位置的X坐标
+            +++   [640, 645, ..., 635, -2],  # 车道线1的坐标
+            +++   ...
+            +++ ]
     """
     # Tusimple官方要求的固定Y轴采样点（56个点，从160到710像素）
     tusimple_h_sample = np.linspace(160, 710, 56)
@@ -708,8 +722,8 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
     row_num_grid, row_num_cls, row_num_lane = row_out.shape  # 格式：[网格数, 锚点数, 车道数]
     # 获取行方向预测的最大概率索引（形状：[row_num_cls, row_num_lane]）
     row_max_indices = row_out.argmax(0).cpu()
-    # 行存在性判断：在网格维度取argmax（若存在性预测是二分类，需调整维度顺序）
-    row_valid = row_ext.argmax(0).cpu()  # 形状：[row_num_cls, row_num_lane]
+    # 行存在性判断：在网格维度取argmax（若存在性预测是二分类，需调整维度顺序）  # argmax是沿 axis 找出这个轴上的的最大值索引（下标）
+    row_valid = row_ext.argmax(0).cpu()  # 形状：[row_num_cls, row_num_lane]    # y 轴是行，y轴上有row_num_cls个点
     # 将数据移到CPU并转换为float类型
     row_out = row_out.cpu()
 
@@ -721,9 +735,9 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
 
     # 根据模式选择要处理的车道线索引 --------------------------------------------------------
     if mode == 'normal' or mode == '2row2col':
-        # 默认模式：处理第1、2条行车道线（索引从0开始）和第0、3条列车道线
-        row_lane_list = [1, 2]  # 行车道线索引
-        col_lane_list = [0, 3]  # 列车道线索引
+        # 默认模式：处理第1、2条车道线（索引从0开始）和第0、3条车道线
+        row_lane_list = [1, 2]  # y轴指向的车道线索引  1，2构成本车道
+        col_lane_list = [0, 3]  # x轴指向的车道线索引
     elif mode == '4row':
         # 处理所有4条行车道线
         row_lane_list = range(row_num_lane)
@@ -736,7 +750,7 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
         raise NotImplementedError(f"未实现的模式: {mode}")
 
     # 局部窗口参数配置 -----------------------------------------------------------------
-    local_width_row = 14  # 行方向预测时考虑的局部窗口宽度（左右各扩展14个网格）
+    local_width_row = 14  # 行方向预测时考虑的局部窗口宽度（左右各扩展14个网格）   1-100范围内选择14-86
     local_width_col = 14  # 列方向预测时考虑的局部窗口宽度
     min_lanepts_row = 3  # 行车道线有效的最小点数阈值
     min_lanepts_col = 3  # 列车道线有效的最小点数阈值
@@ -744,10 +758,10 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
     all_lanes = []  # 存储最终生成的所有车道线坐标
 
     # ============================================================================
-    # 处理行车道线（垂直方向车道线，如左右车道线）
+    # 处理行车道线（垂直方向车道线，如左右车道线）（注意：行上指的是纵向锚点，所以说垂直）
     # ============================================================================
     for row_lane_idx in row_lane_list:
-        # 检查当前车道线是否存在：有效点数超过阈值
+        # 检查四条车道线是否存在，有效车道线数量是否超过min_lanepts_row
         if row_valid[:, row_lane_idx].sum() > min_lanepts_row:
             cur_lane = []  # 存储当前车道线在56个固定Y位置的X坐标
 
@@ -761,9 +775,9 @@ def generate_tusimple_lines(row_out, row_ext, col_out, col_ext, row_anchor=None,
                     all_ind = torch.tensor(list(range(start_idx, end_idx + 1)))
 
                     # 计算加权平均位置（亚像素细化）
-                    # 1. 对窗口内的预测值做softmax归一化
+                    # 1. 对窗口内的预测值做softmax归一化，可以得到100个网格中每一个位置的概率
                     # 2. 用概率值加权求和得到精细化的网格位置
-                    coord = (row_out[all_ind, row_cls_idx, row_lane_idx].softmax(0) * all_ind.float()).sum() + 0.5
+                    coord = (row_out[all_ind, row_cls_idx, row_lane_idx].softmax(0) * all_ind.float()).sum() + 0.5    # 提取0-100中提取all_ind范围的值做softmax，然后和all_ind中的值相乘
                     # 将网格位置映射到实际图像坐标（假设输入图像尺寸为1280x720）
                     coord_x = coord / (row_num_grid - 1) * 1280  # <span style="color: red">横向坐标映射</span>
                     coord_y = row_anchor[row_cls_idx] * 720  # <span style="color: red">纵向坐标通过锚点比例计算</span>
@@ -914,7 +928,7 @@ def run_test_tusimple(net, data_root, work_dir, exp_name, distributed, crop_rati
                     # - row_anchor: 纵向锚点位置（56个归一化坐标）
                     # - col_anchor: 横向锚点位置（41个归一化坐标）
                     'lanes': generate_tusimple_lines(
-                        pred['loc_row'][b_idx],
+                        pred['loc_row'][b_idx],        # 会去除B这个通道，取b_idx个样本
                         pred['exist_row'][b_idx],
                         pred['loc_col'][b_idx],
                         pred['exist_col'][b_idx],

@@ -82,21 +82,27 @@ class UFLDv2_ONNX:
         valid_col = exist_col.argmax(1)
 
         coords = []  # 存储所有车道线的坐标
-        row_lane_idx = [1, 2]
-        col_lane_idx = [0, 3]  # 列车道线索引
+        row_lane_idx = [0, 1, 2, 3]
+        col_lane_idx = []  # 列车道线索引
+
+        # 局部窗口参数配置 -----------------------------------------------------------------
+        local_width_row = 14  # 行方向预测时考虑的局部窗口宽度（左右各扩展14个网格）   1-100范围内选择14-86
+        local_width_col = 14  # 列方向预测时考虑的局部窗口宽度
+        min_lanepts_row = 3  # 行车道线有效的最小点数阈值
+        min_lanepts_col = 3  # 列车道线有效的最小点数阈值
 
         # 处理行车道线（垂直方向车道线）---------------------------------------------
         for i in row_lane_idx:
             tmp = []
-            # 存在性判断：超过半数的锚点认为存在车道线
-            if valid_row[0, :, i].sum() > num_cls_row / 2:
+            # 存在性判断：存在车道线
+            if valid_row[0, :, i].sum() > 3:
                 # 遍历每个行锚点
                 for k in range(valid_row.shape[1]):
                     if valid_row[0, k, i]:  # 当前锚点存在车道线
                         # 在预测位置周围创建索引窗口（提高位置精度）
                         all_ind = torch.tensor(list(range(
-                            max(0, max_indices_row[0, k, i] - self.input_width),
-                            min(num_grid_row - 1, max_indices_row[0, k, i] + self.input_width) + 1
+                            max(0, max_indices_row[0, k, i] - local_width_row),
+                            min(num_grid_row - 1, max_indices_row[0, k, i] + local_width_row) + 1
                         )))
 
                         # 计算加权平均位置 -------------------------------------------------
@@ -104,9 +110,9 @@ class UFLDv2_ONNX:
                         # 公式：out_tmp = Σ(softmax(loc_row[all_ind]) * all_ind) + 0.5
                         out_tmp = (loc_row[0, all_ind, k, i].softmax(0) * all_ind.float()).sum() + 0.5
                         # 将归一化位置映射回原图宽度
-                        out_tmp = out_tmp / (num_grid_row - 1) * self.ori_img_w
+                        out_tmp = out_tmp / (num_grid_row - 1) * 800
                         # 计算对应y坐标（行锚点位置）
-                        y_coord = int(self.row_anchor[k] * self.ori_img_h)
+                        y_coord = int(self.row_anchor[k] * 320)
                         tmp.append((int(out_tmp), y_coord))
                 coords.append(tmp)
 
@@ -114,7 +120,7 @@ class UFLDv2_ONNX:
         for i in col_lane_idx:
             tmp = []
             # 存在性判断：超过1/4的锚点认为存在
-            if valid_col[0, :, i].sum() > num_cls_col / 4:
+            if valid_col[0, :, i].sum() > 3:
                 for k in range(valid_col.shape[1]):
                     if valid_col[0, k, i]:
                         all_ind = torch.tensor(list(range(
@@ -134,41 +140,79 @@ class UFLDv2_ONNX:
 
     def forward(self, img):
         """
-        完整处理流程：预处理 → 推理 → 后处理 → 可视化
+        完整的车道线检测流程：预处理 → 推理 → 后处理 → 可视化
         参数：
-            img : 输入图像（BGR格式，numpy数组）
+            img : numpy.ndarray - 输入图像，BGR颜色格式，形状为[H(高度), W(宽度), 3]  任意分辨率的输入
+        返回：
+            coords : list - 车道线坐标列表，每个元素为[(x1,y1), (x2,y2),...]表示单条车道线
         """
-        im0 = img.copy()  # 保留原始图像用于可视化
+        # ============================ 视频帧预处理 ==============================
+        # 阶段目标：将输入帧适配到模型训练时的视野范围和比例
 
-        # 图像预处理 ------------------------------------------------------------
-        # 1. 裁剪顶部区域（根据训练时的裁剪比例）
-        img = img[self.cut_height:, :, :]
-        # 2. 调整到模型输入尺寸（双三次插值保持清晰度）
-        img = cv2.resize(img, (self.input_width, self.input_height), cv2.INTER_CUBIC)
-        # 3. 归一化到[0,1]范围
-        img = img.astype(np.float32) / 255.0
-        # 4. 调整维度顺序为NCHW（模型输入要求）
-        # 原始形状：HWC (height, width, channel)
-        # 转换后：NCHW (batch=1, channel, height, width)
-        img = np.transpose(img, (2, 0, 1))[np.newaxis, ...]
+        # 1. 基准尺寸调整（双线性插值平衡效率与质量）
+        # OpenCV的resize参数顺序为（宽，高），输出形状变为（高=903，宽=800）
+        resized_frame = cv2.resize(img, (800, 903))
 
-        # ONNX推理 -------------------------------------------------------------
-        outputs = self.session.run(
-            self.output_names,  # 需要获取的输出节点名称列表
-            {self.input_name: img}  # 输入数据字典
-        )
-        # 输出顺序对应：loc_row, loc_col, exist_row, exist_col
+        # 2. 关键区域提取（380:700行，去除天空和引擎盖干扰）# 针对摄像头修改
+        roi_frame = resized_frame[380:700, :, :]  # 获取高度320px的ROI
 
-        # 后处理：转换坐标 ------------------------------------------------------
-        coords = self.pred2coords(outputs)
+        # 3. 保留原始ROI用于可视化（避免后续处理影响显示）
+        visual_frame = roi_frame.copy()  # 类型：numpy.ndarray (320, 800, 3)
 
-        # 可视化结果 -----------------------------------------------------------
-        # 在原始图像上绘制检测到的车道线点
-        for lane in coords:  # 遍历每条车道线
-            for coord in lane:  # 遍历车道线的每个点
-                # 绘制绿色实心圆点（半径2px）
-                cv2.circle(im0, coord, 2, (0, 255, 0), -1)
-        cv2.imshow("result", im0)  # 显示结果
+        # ============================ 模型输入预处理 =============================
+        # 阶段目标：生成符合模型输入规范的张量
+
+        # 1. 裁剪顶部区域（根据训练配置截取有效区域）
+        # 输入形状（高=320, 宽=800）→ 输出形状（高=320-cut_height, 宽=800）
+        model_input = roi_frame[self.cut_height:, :, :]  # 形状变为 (320-cut_height, 800, 3)  ((320-64), 800, 3)
+
+        # 2. 尺寸标准化（双三次插值保持几何精度）
+        # 调整到模型输入尺寸（宽=self.input_width, 高=self.input_height）
+        model_input = cv2.resize(
+            model_input,
+            (self.input_width, self.input_height),
+            interpolation=cv2.INTER_CUBIC
+        )  # 输出形状变为（高，宽，3）即（self.input_height, self.input_width, 3）
+
+        # visual_frame = model_input.copy()
+
+        # 3. 归一化处理（匹配训练时的数据标准化方式）
+        model_input = model_input.astype(np.float32) / 255.0
+
+        # 4. 转换为NCHW格式（添加批次维度，调整通道顺序）
+        input_tensor = np.transpose(model_input, (2, 0, 1))[np.newaxis, ...]  # 形状 (1, 3, H, W)
+
+        # 5. 确保内存连续性（提升推理效率）
+        input_tensor = np.ascontiguousarray(input_tensor)
+
+        # ============================== 模型推理 ================================
+        # 使用ONNX Runtime进行高效推理
+        model_outputs = self.session.run(
+            output_names=self.output_names,  # 预加载的输出节点名称
+            input_feed={self.input_name: input_tensor}  # 输入数据字典
+        )  # 输出顺序：loc_row, loc_col, exist_row, exist_col
+
+        # ============================ 后处理流程 ================================
+        # 将模型输出转换为实际坐标
+        coords = self.pred2coords(model_outputs)  # 坐标格式 [[(x1,y1), (x2,y2), ...], ...]
+
+        # ============================= 结果可视化 ================================
+        # 将模型输出坐标转换为原始ROI图像的坐标（假设pred2coords已处理缩放）
+        for lane_points in coords:  # 遍历每条车道线
+            if len(lane_points) == 0:
+                continue
+            # 绘制每个检测点
+            for pt in lane_points:
+                # 将浮点坐标转换为整数像素位置
+                x, y = int(pt[0]), int(pt[1])
+                # 绘制绿色实心圆点（半径3px）
+                cv2.circle(visual_frame, (x, y), radius=3, color=(0, 255, 0), thickness=-1)
+
+        # 实时显示检测结果
+        cv2.imshow("Lane Detection", visual_frame)
+        cv2.waitKey(1)  # 允许图像窗口更新
+
+        return coords
 
 
 def get_args():
@@ -195,12 +239,6 @@ if __name__ == "__main__":
         success, img = cap.read()
         if not success:  # 视频读取结束
             break
-
-        # 视频帧预处理 ----------------------------------------------------------
-        # 1. 调整到1600x903分辨率（适配原始模型训练尺寸）
-        img = cv2.resize(img, (800, 903))
-        # 2. 裁剪ROI区域（380:700行，所有列）
-        img = img[380:700, :, :]
 
         # 执行检测
         detector.forward(img)
