@@ -20,13 +20,13 @@ def get_args():
     """命令行参数解析器"""
     parser = argparse.ArgumentParser()
     # 配置文件路径（默认使用CULane的ResNet34配置）
-    parser.add_argument('--config_path', default='configs/tusimple_res18.py',
+    parser.add_argument('--config_path', default='configs/culane_res34.py',
                       help='模型配置文件路径', type=str)
     # 预训练模型路径
-    parser.add_argument('--model_path', default='weights/tusimple_res18.pth',
+    parser.add_argument('--model_path', default='weights/culane_res34.pth',
                       help='PyTorch模型权重文件路径', type=str)
     # 输出精度选择（FP32或FP16）
-    parser.add_argument('--accuracy', default='fp32', choices=['fp16', 'fp32'],
+    parser.add_argument('--accuracy', default='fp16', choices=['fp16', 'fp32'],
                       help='输出模型的精度类型', type=str)
     # 输入图像尺寸（宽，高）需与训练时一致
     parser.add_argument('--size', default=(1600, 320),         #  按照不同的模型输入修改
@@ -53,6 +53,7 @@ def convert(model, args):
             model,                # 待转换模型
             images,               # 虚拟输入数据
             onnx_path,            # 输出路径
+            opset_version=16,
             verbose=False,        # 不显示详细导出信息
             input_names=['input'], # 输入节点名称
             output_names=["loc_row", "loc_col", "exist_row", "exist_col"]  # 输出节点名称

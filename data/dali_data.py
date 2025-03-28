@@ -139,6 +139,7 @@ def ExternalSourceTrainPipeline(batch_size, num_threads, device_id, external_dat
     pipe = Pipeline(batch_size, num_threads, device_id)
     with pipe:
         jpegs, seg_images, labels = fn.external_source(source=external_data, num_outputs=3)
+        # todo : mixed report error, 使用cpu编解码
         images = fn.decoders.image(jpegs, device="mixed")
         seg_images = fn.decoders.image(seg_images, device="mixed")
         if normalize_image_scale:

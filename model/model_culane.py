@@ -126,6 +126,42 @@ class parsingNet(torch.nn.Module):
 
         return pred_dict
 
+    def forward_tta(self, x):
+        x2, x3, fea = self.model(x)
+
+        pooled_fea = self.pool(fea)
+        n, c, h, w = pooled_fea.shape
+
+        left_pooled_fea = torch.zeros_like(pooled_fea)
+        right_pooled_fea = torch.zeros_like(pooled_fea)
+        up_pooled_fea = torch.zeros_like(pooled_fea)
+        down_pooled_fea = torch.zeros_like(pooled_fea)
+
+        left_pooled_fea[:, :, :, :w - 1] = pooled_fea[:, :, :, 1:]
+        left_pooled_fea[:, :, :, -1] = pooled_fea.mean(-1)
+
+        right_pooled_fea[:, :, :, 1:] = pooled_fea[:, :, :, :w - 1]
+        right_pooled_fea[:, :, :, 0] = pooled_fea.mean(-1)
+
+        up_pooled_fea[:, :, :h - 1, :] = pooled_fea[:, :, 1:, :]
+        up_pooled_fea[:, :, -1, :] = pooled_fea.mean(-2)
+
+        down_pooled_fea[:, :, 1:, :] = pooled_fea[:, :, :h - 1, :]
+        down_pooled_fea[:, :, 0, :] = pooled_fea.mean(-2)
+        # 10 x 25
+        fea = torch.cat([pooled_fea, left_pooled_fea, right_pooled_fea, up_pooled_fea, down_pooled_fea], dim=0)
+        fea = fea.view(-1, self.input_dim)
+
+        out = self.cls(fea)
+
+        return {'loc_row': out[:, :self.dim1].view(-1, self.num_grid_row, self.num_cls_row, self.num_lane_on_row),
+                'loc_col': out[:, self.dim1:self.dim1 + self.dim2].view(-1, self.num_grid_col, self.num_cls_col,
+                                                                        self.num_lane_on_col),
+                'exist_row': out[:, self.dim1 + self.dim2:self.dim1 + self.dim2 + self.dim3].view(-1, 2,
+                                                                                                  self.num_cls_row,
+                                                                                                  self.num_lane_on_row),
+                'exist_col': out[:, -self.dim4:].view(-1, 2, self.num_cls_col, self.num_lane_on_col)}
+
 
 def get_model(cfg):
     """模型构建入口函数
@@ -133,9 +169,9 @@ def get_model(cfg):
     典型配置参数示例：
         cfg.backbone = '50'          # ResNet-50
         cfg.num_cell_row = 72        # 行网格数
-        cfg.num_row = 56             # 行分类数
+        cfg.num_row = 56             # 行锚点数量
         cfg.num_cell_col = 81        # 列网格数
-        cfg.num_col = 41             # 列分类数
+        cfg.num_col = 41             # 列锚点数量
         cfg.num_lanes = 4            # 车道线数量
         cfg.use_aux = True           # 启用辅助分割
         cfg.train_height = 288       # 输入高度
