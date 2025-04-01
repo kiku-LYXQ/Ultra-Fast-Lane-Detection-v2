@@ -114,10 +114,10 @@ class UFLDv2_ONNX:
         4. 映射到原始图像坐标系
         """
         # 模型输出解析（顺序必须与模型输出一致）-------------------------------
-        loc_row = pred[0]  # 行位置预测 [1, num_grid_row, num_cls_row, 4]
-        loc_col = pred[1]  # 列位置预测 [1, num_grid_row, num_cls_col, 4]
-        exist_row = pred[2]  # 行存在性概率 [1, num_grid_row, 2, 4]
-        exist_col = pred[3]  # 列存在性概率 [1, num_grid_row, 2, 4]
+        loc_row = pred[0]  # 行位置预测（形状：[1, nums_grid_row, nums_row, 4]）
+        loc_col = pred[1]  # 列位置预测（形状：[1, nums_grid_col, nums_col, 4]）
+        exist_row = pred[2]  # 行存在性概率 [1, 2, nums_row, 4]
+        exist_col = pred[3]  # 列存在性概率 [1, 2, nums_col, 4]
 
         # 最大概率索引获取（numpy实现）----------------------------------------
         # loc_row形状说明：[batch, num_grid_row, num_cls_row, num_lane]

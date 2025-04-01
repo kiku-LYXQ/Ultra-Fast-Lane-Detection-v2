@@ -91,7 +91,7 @@ class UFLDv2_ONNX:
         for i in row_lane_idx:
             tmp = []
             # 存在性判断：有效锚点超过半数则视为存在车道线
-            if valid_row[0, :, i].sum() > self.num_row / 2:
+            if valid_row[0, :, i].sum() > 2*self.num_row / 2:
                 # 遍历每个行锚点（垂直方向采样点）
                 for k in range(valid_row.shape[1]):
                     if valid_row[0, k, i]:  # 当前锚点存在车道线

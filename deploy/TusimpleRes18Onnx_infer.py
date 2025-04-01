@@ -57,7 +57,7 @@ class UFLDv2_ONNX:
         """
         将模型输出转换为实际车道线坐标
         参数：
-            pred : 模型输出元组，包含四个输出张量的numpy数组
+            pred : 模型输出元组，包含四个输出张量的numpy数组，存储的是这个点属于车道线的概率
         返回：
             coords : 车道线坐标列表，每个元素是该车道线的坐标点列表
         """
@@ -72,9 +72,9 @@ class UFLDv2_ONNX:
         batch_size, num_grid_col, num_cls_col, num_lane_col = loc_col.shape
 
         # 获取最大概率索引（确定最可能的位置） ----------------------------------------
-        # 行位置的最大索引（形状：[1, num_cls_row, 4]）
+        # 行位置的最大索引（形状：[1, num_cls_row, 4]）  得到的是四个车道线中每个行（y）方向上车道线位于x方向的100个网格中的最大概率x的索引值
         max_indices_row = loc_row.argmax(1)
-        # 行存在性的最大索引（0表示不存在，1表示存在）
+        # 行存在性的最大索引（0表示不存在，1表示存在）      得到的是四个车道线中每个行（y）方向上车道线车道线存在，不存在
         valid_row = exist_row.argmax(1)
         # 列位置的最大索引
         max_indices_col = loc_col.argmax(1)
@@ -95,7 +95,7 @@ class UFLDv2_ONNX:
         for i in row_lane_idx:
             tmp = []
             # 存在性判断：存在车道线
-            if valid_row[0, :, i].sum() > 3:
+            if valid_row[0, :, i].sum() > num_cls_row / 2:
                 # 遍历每个行锚点
                 for k in range(valid_row.shape[1]):
                     if valid_row[0, k, i]:  # 当前锚点存在车道线
@@ -120,7 +120,7 @@ class UFLDv2_ONNX:
         for i in col_lane_idx:
             tmp = []
             # 存在性判断：超过1/4的锚点认为存在
-            if valid_col[0, :, i].sum() > 3:
+            if valid_col[0, :, i].sum() > num_cls_col / 2:
                 for k in range(valid_col.shape[1]):
                     if valid_col[0, k, i]:
                         all_ind = torch.tensor(list(range(

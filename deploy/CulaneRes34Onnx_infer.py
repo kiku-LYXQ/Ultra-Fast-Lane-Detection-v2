@@ -90,10 +90,10 @@ class UFLDv2_ONNX:
             coords : 车道线坐标列表，每个元素是该车道线的坐标点列表
         """
         # 将numpy数组转换为torch张量（保持与原始实现兼容）
-        loc_row = torch.from_numpy(pred[0])  # 行位置预测（形状：[1, num_grid_row, num_cls_row, 4]）
-        loc_col = torch.from_numpy(pred[1])  # 列位置预测（形状：[1, num_grid_row, num_cls_col, 4]）
-        exist_row = torch.from_numpy(pred[2])  # 行存在性预测 [1, num_grid_row, 2, 4]
-        exist_col = torch.from_numpy(pred[3])  # 列存在性预测 [1, num_grid_row, 2, 4]
+        loc_row = torch.from_numpy(pred[0])  # 行位置预测（形状：[1, nums_grid_row, nums_row, 4]）
+        loc_col = torch.from_numpy(pred[1])  # 列位置预测（形状：[1, nums_grid_col, nums_col, 4]）
+        exist_row = torch.from_numpy(pred[2])  # 行存在性预测 [1, 2, nums_row, 4]
+        exist_col = torch.from_numpy(pred[3])  # 列存在性预测 [1, 2, nums_col, 4]
 
         # 获取各维度尺寸
         batch_size, num_grid_row, num_cls_row, num_lane_row = loc_row.shape
