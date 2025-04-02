@@ -31,17 +31,39 @@ def softmax(x, axis=-1):
     return e_x / e_x.sum(axis=axis, keepdims=True)
 
 class UFLDv2_ONNX:
-    def __init__(self, onnx_path, config_path, ori_size):
+    def __init__(self, onnx_path, config_path, ori_size, use_gpu=False):
         # 配置ONNX Runtime参数 -------------------------------------------------
         options = ort.SessionOptions()
         options.intra_op_num_threads = 4  # 限制计算线程数
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
+        providers = ['CPUExecutionProvider']  # 默认使用CPU
+        if use_gpu:
+            # 优先尝试CUDA，然后是TensorRT（如果可用）
+            providers = [
+                ('CUDAExecutionProvider', {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kNextPowerOfTwo',
+                    'gpu_mem_limit': 1 * 1024 * 1024 * 1024,  # 限制1GB显存
+                    'cudnn_conv_algo_search': 'HEURISTIC',
+                    'do_copy_in_default_stream': True,
+                }),
+                'CPUExecutionProvider'
+            ]
+
         self.session = ort.InferenceSession(
             onnx_path,
-            providers=['CPUExecutionProvider'],  # 强制使用CPU
+            providers=providers,  # 强制使用CPU
             sess_options=options
         )
+
+        # 检查GPU是否实际启用（调试信息）
+        print("可用Providers:", ort.get_available_providers())
+        print(f"当前使用的执行提供器：{self.session.get_providers()}")
+        if use_gpu and 'CUDAExecutionProvider' in self.session.get_providers():
+            print("CUDA GPU加速已启用")
+        else:
+            print("使用CPU进行推理")
 
         # 输入输出配置 --------------------------------------------------------
         self.input_name = self.session.get_inputs()[0].name
@@ -59,11 +81,6 @@ class UFLDv2_ONNX:
         # 预计算锚点坐标 ------------------------------------------------------
         self.row_anchor = np.linspace(160, 710, cfg.num_row) / 720
         self.col_anchor = np.linspace(0, 1, cfg.num_col)
-
-    def numpy_softmax(self, x, axis=-1):
-        """数值稳定的Softmax实现"""
-        e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
-        return e_x / e_x.sum(axis=axis, keepdims=True)
 
     def pred2coords(self, pred):
         """纯NumPy实现的后处理逻辑"""
@@ -91,14 +108,14 @@ class UFLDv2_ONNX:
         for i in row_lane_idx:
             tmp = []
             # 存在性判断：有效锚点超过半数则视为存在车道线
-            if valid_row[0, :, i].sum() > 2*self.num_row / 2:
+            if valid_row[0, :, i].sum() > self.num_row / 2:
                 # 遍历每个行锚点（垂直方向采样点）
                 for k in range(valid_row.shape[1]):
                     if valid_row[0, k, i]:  # 当前锚点存在车道线
                         # 生成索引窗口（在预测位置周围扩展）
                         current_max = max_indices_row[0, k, i]
-                        start = max(0, current_max - self.input_width)
-                        end = min(loc_row.shape[1] - 1, current_max + self.input_width) + 1
+                        start = max(0, current_max - local_width_row)
+                        end = min(loc_row.shape[1] - 1, current_max + local_width_row) + 1
                         all_ind = np.arange(start, end)
 
                         # 加权平均计算（关键精度提升步骤）-----------------------
@@ -123,8 +140,8 @@ class UFLDv2_ONNX:
                         for k in range(valid_col.shape[1]):
                             if valid_col[0, k, i]:
                                 current_max = max_indices_col[0, k, i]
-                                start = max(0, current_max - self.input_width)
-                                end = min(loc_col.shape[1] - 1, current_max + self.input_width) + 1
+                                start = max(0, current_max - local_width_col)
+                                end = min(loc_col.shape[1] - 1, current_max + local_width_col) + 1
                                 all_ind = np.arange(start, end)
 
                                 weights = softmax(loc_col[0, all_ind, k, i], axis=-1)
@@ -196,7 +213,7 @@ class UFLDv2_ONNX:
                 # 将浮点坐标转换为整数像素位置
                 x, y = int(pt[0]), int(pt[1])
                 # 绘制绿色实心圆点（半径3px）
-                cv2.circle(visual_frame, (x, y), radius=1, color=(0, 255, 0), thickness=-1)
+                cv2.circle(visual_frame, (x, y), radius=3, color=(0, 255, 0), thickness=-1)
 
         # 实时显示检测结果
         cv2.imshow("Lane Detection", visual_frame)
@@ -211,12 +228,14 @@ def get_args():
     parser.add_argument('--onnx_path', default='weights/tusimple_res18.onnx')
     parser.add_argument('--video_path', default='example.mp4')
     parser.add_argument('--ori_size', type=int, nargs=2, default=[800, 320])
+    parser.add_argument('--use_gpu', action='store_true',
+                        help='启用CUDA GPU加速（需要安装onnxruntime-gpu）')
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = get_args()
-    detector = UFLDv2_ONNX(args.onnx_path, args.config_path, args.ori_size)
+    detector = UFLDv2_ONNX(args.onnx_path, args.config_path, args.ori_size, use_gpu = args.use_gpu)
 
     cap = cv2.VideoCapture(args.video_path)
     while cap.isOpened():
